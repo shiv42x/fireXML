@@ -22,7 +22,7 @@ struct XMLNode
 {
 	XMLString* tag;
 	XMLString* innerText;
-	std::vector<XMLAttrib> attributes;
+	std::vector<XMLAttrib*> attributes;
 
 	XMLNode* parent;
 	std::vector<XMLNode*> children;
@@ -81,20 +81,22 @@ inline void ConsumeWhitespace(XMLParser* parser)
 *
 * TODO: make this into a pure tokenizer, with user defined delimiters?
 */
-inline std::vector<XMLAttrib> TokenizeAttributes(XMLParser* parser, XMLString* openingTag)
+inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* openingTag)
 {
 	enum class TokenizerState : uint8_t
 	{
-		InitialWhitespaceCheck,
-		NewToken,
-		BuildToken,
-		Whitespace,
-		CompleteToken,
-		Malformed,
-		EndOfString
+		InitialWhitespaceCheck,		// disallows whitespace (as in xml spec)
+		NewToken,					// might not need this
+		TagNameToken,				// tokenizing tag's name
+		AttributeNameToken,			// tokenizing attribute's name
+		AttributeValueToken,		// tokenizing attribute's value
+		ConsumeAnyWhitespace,		// consume whitespace if any
+		CompleteToken,				// completed token
+		Malformed,					// badly formed structure
+		EndOfString					// end of string reached, end parsing
 	};
 
-	std::vector<XMLAttrib> foundAttributes;
+	std::vector<XMLAttrib*> foundAttributes;
 
 	TokenizerState currState = TokenizerState::InitialWhitespaceCheck;
 	TokenizerState nextState = TokenizerState::InitialWhitespaceCheck;
@@ -102,8 +104,11 @@ inline std::vector<XMLAttrib> TokenizeAttributes(XMLParser* parser, XMLString* o
 	std::string tagName = "";
 	std::string currToken = "";
 	std::string currAttribName = "";
+	std::string errorMsg = "";
 
 	// this bool will be used to include whitespaces when tokenizing attribute's value
+	// might not need this anymore, since we have explicit state for 
+	// attrib value tokenization
 	bool tokenizingAttributeValue = false;
 
 	auto currChar = openingTag->value.begin();
@@ -122,16 +127,126 @@ inline std::vector<XMLAttrib> TokenizeAttributes(XMLParser* parser, XMLString* o
 		switch (currState)
 		{
 		case TokenizerState::InitialWhitespaceCheck:
-			nextState = TokenizerState::EndOfString;
+		{
+			if (isspace(currChar[0]))
+			{
+				errorMsg = "WHITESPACE::Invalid element name at index: ";
+				nextState = TokenizerState::Malformed;
+			}
+			else
+				nextState = TokenizerState::TagNameToken; 
+		}
+		break;
+
+
+		case TokenizerState::ConsumeAnyWhitespace:
+		{
+			if (isspace(currChar[0]))
+			{
+				currChar++;
+				nextState = TokenizerState::ConsumeAnyWhitespace;
+			}
+			// any char after setting tag name and consuming whitespace
+			// will be assumed to be start of attribute name
+			// if in allowed character set for attribute names
+			// need to find which are allowed in spec
+			else if (currChar[0] != '=' && currChar[0] != '"')
+			{
+				nextState = TokenizerState::AttributeNameToken;
+			}
+			// matches opening quote in attribute assignment
+			else if (currChar[0] == '"')
+			{
+				nextState = TokenizerState::AttributeValueToken;
+			}
+			else if (currChar[0] == '=')
+			{
+				nextState = TokenizerState::AttributeNameToken;
+			}
+			// may not need this
+			// else, have a complete tokenizable string
+			//else
+			//{
+			//	nextState = TokenizerState::CompleteToken;
+			//}
+		}
+		break;
+
+		case TokenizerState::TagNameToken:
+		{
+			// if currChar is in allowed character set, accumulate it
+			// allowed first:			alpha, _, :
+			// allowed second or later: alphanum, _, :, ., -
+			// for now just exclude space, =, and "
+			if (currChar[0] != '=' && currChar[0] != '"' && !isspace(currChar[0]))
+			{
+				currToken += currChar[0];
+				currChar++;
+				nextState = TokenizerState::TagNameToken;
+			}
+			// space is delim for tag name
+			else if (isspace(currChar[0]))
+			{
+				nextState = TokenizerState::CompleteToken;
+			}
+			else
+			{
+				errorMsg = "ELEMENT_NAME::Could not tokenize element name at index: ";
+				nextState = TokenizerState::Malformed;
+			}
+		}
+		break;
+
+		case TokenizerState::AttributeNameToken:
+		{
+			// if not space or =, delims for attribute name, accumulate it
+			if (!isspace(currChar[0]) && currChar[0] != '=')
+			{
+				currToken += currChar[0];
+				currChar++;
+				nextState = TokenizerState::AttributeNameToken;
+			}
+			// else delim (=) hit, but check anyway
+			// complete 
+			else if (currChar[0] == '=')
+			{
+				nextState = TokenizerState::CompleteToken;
+			}
+			// if space, consume it, until = hit
+			else if (isspace(currChar[0]))
+			{
+				nextState = TokenizerState::ConsumeAnyWhitespace;
+			}
+		}
+		break;
+
+		case TokenizerState::AttributeValueToken:
+		{
+			// if char in allowed character set for attribute values, accumulate it
+			// apparently unescaped <> not allowed
+			// escaped versions:  &quot ", &apos ', &lt <, &gt >, &amp & 
+			if (currChar[0] != '"')
+			{
+				currToken += currChar[0];
+				currChar++;
+				nextState = TokenizerState::AttributeValueToken
+			}
+		}
+		break;
+
+		case TokenizerState::Malformed:
+		{
+			auto errorIndex = std::distance(openingTag->value.begin(), currChar);
+			errorMsg += std::to_string(errorIndex + 1);
+			std::string loc(errorIndex + 1, ' ');
+			std::cout << "MALFORMED::" << errorMsg << '\n';
+			std::cout << '<' << openingTag->value << ">\n";
+			std::cout << loc << '^' << '\n';
+			std::exit(-1);
+		}
+		break;
 		}
 		currState = nextState;
-	}
-
-	if (!currToken.empty())
-	{
-		// handle error
-		std::cout << "Hanging attribute: " << currToken << std::endl;
-		std::exit(-1);
 	}
 
 	openingTag->value = tagName;
@@ -292,7 +407,7 @@ inline XMLNode* ParseNode(XMLParser* parser)
 	if (!openingTag)
 		std::cout << "ParseOpening() returned null." << std::endl; //TODO: add error handling
 
-	std::vector<XMLAttrib> attributes = TokenizeAttributes(parser, openingTag);
+	std::vector<XMLAttrib*> attributes = TokenizeAttributes(parser, openingTag);
 
 	//TODO: check for self-closing tag
 
