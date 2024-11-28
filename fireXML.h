@@ -78,24 +78,39 @@ inline void ConsumeWhitespace(XMLParser* parser)
 * sets openingTag's value to only tag_name
 * returns array of found attributes,
 * i.e. attrib1 & attrib2 along with their values as XMLAttrib structs
-*
-* TODO: make this into a pure tokenizer, with user defined delimiters?
 */
+
+// TEMP move outside of TokenizeAttributes to allow debug prints
+enum class TokenizerState : uint8_t
+{
+	InitialWhitespaceCheck,		// disallows whitespace (as in xml spec)
+	//NewToken,					// might not need this
+	TagNameToken,				// tokenizing tag's name
+	AttributeNameToken,			// tokenizing attribute's name
+	AttributeValueToken,		// tokenizing attribute's value
+	ConsumeAnyWhitespace,		// consume whitespace if any
+	CompleteToken,				// completed token
+	Malformed,					// badly formed structure
+	EndOfString					// end of string reached, end parsing
+};
+
+inline const char* ToString(TokenizerState s)
+{
+	switch (s)
+	{
+	case TokenizerState::InitialWhitespaceCheck:	return "InitialWhitespaceCheck";
+	case TokenizerState::TagNameToken:				return "TagNameToken";
+	case TokenizerState::AttributeNameToken:		return "AttributeNameToken";
+	case TokenizerState::AttributeValueToken:		return "AttributeValueToken";
+	case TokenizerState::ConsumeAnyWhitespace:		return "ConsumeWhitespace";
+	case TokenizerState::CompleteToken:				return "CompleteToken";
+	case TokenizerState::Malformed:					return "Malformed";
+	case TokenizerState::EndOfString:				return "EndOfString";
+	}
+}
+
 inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* openingTag)
 {
-	enum class TokenizerState : uint8_t
-	{
-		InitialWhitespaceCheck,		// disallows whitespace (as in xml spec)
-		NewToken,					// might not need this
-		TagNameToken,				// tokenizing tag's name
-		AttributeNameToken,			// tokenizing attribute's name
-		AttributeValueToken,		// tokenizing attribute's value
-		ConsumeAnyWhitespace,		// consume whitespace if any
-		CompleteToken,				// completed token
-		Malformed,					// badly formed structure
-		EndOfString					// end of string reached, end parsing
-	};
-
 	std::vector<XMLAttrib*> foundAttributes;
 
 	TokenizerState currState = TokenizerState::InitialWhitespaceCheck;
@@ -122,7 +137,6 @@ inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* 
 		*
 		* TODO: allow single quotes
 		* TODO: change to use permitted character set lookups
-		* TODO: switch from while loop to pure states? solves code outside of state machine
 		*/
 		switch (currState)
 		{
@@ -138,7 +152,6 @@ inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* 
 		}
 		break;
 
-
 		case TokenizerState::ConsumeAnyWhitespace:
 		{
 			if (isspace(currChar[0]))
@@ -150,19 +163,29 @@ inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* 
 			// will be assumed to be start of attribute name
 			// if in allowed character set for attribute names
 			// need to find which are allowed in spec
-			else if (currChar[0] != '=' && currChar[0] != '"')
+			else if (currChar[0] != '=' && currChar[0] != '"' && currAttribName.empty())
 			{
 				nextState = TokenizerState::AttributeNameToken;
 			}
-			// matches opening quote in attribute assignment
+			// matches opening " in attribute assignment
+			// tick forward
 			else if (currChar[0] == '"')
 			{
+				currChar++;
 				nextState = TokenizerState::AttributeValueToken;
 			}
+			// if =, attribute name expected to be tokenized
 			else if (currChar[0] == '=')
 			{
-				nextState = TokenizerState::AttributeNameToken;
+				nextState = TokenizerState::CompleteToken;
 			}
+			// expecting attribute value, but didn't find opening "
+			else if (currChar[0] != '=' && currChar[0] != '"' && !currAttribName.empty())
+			{
+				errorMsg = "MISSING_ATTRIBUTE_VALUE::Missing attribute value at index: ";
+				nextState = TokenizerState::Malformed;
+			}
+
 			// may not need this
 			// else, have a complete tokenizable string
 			//else
@@ -207,7 +230,7 @@ inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* 
 				nextState = TokenizerState::AttributeNameToken;
 			}
 			// else delim (=) hit, but check anyway
-			// complete 
+			// complete attribute name token
 			else if (currChar[0] == '=')
 			{
 				nextState = TokenizerState::CompleteToken;
@@ -229,8 +252,74 @@ inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* 
 			{
 				currToken += currChar[0];
 				currChar++;
-				nextState = TokenizerState::AttributeValueToken
+				nextState = TokenizerState::AttributeValueToken;
 			}
+			// else delim (") hit, but check anyway
+			// complete attribute value token
+			else if (currChar[0] == '"')
+			{
+				// if tokenizing an attrib value without a name
+				if (currAttribName.empty())
+				{
+					errorMsg = "MISSING_ATTRIBUTE_NAME::Missing attribute name at index: ";
+					nextState = TokenizerState::Malformed;
+					break;
+				}
+
+				nextState = TokenizerState::CompleteToken;
+			}
+		}
+		break;
+
+		case TokenizerState::CompleteToken:
+		{
+			// if currChar is space, assume it is tag name
+			if (isspace(currChar[0]))
+			{
+				tagName = currToken;
+			}
+			// if currChar is =, assume it is attribute name
+			else if (currChar[0] == '=')
+			{
+				currAttribName = currToken;
+			}
+			// if currChar is "(end quote), assume it is attribute value
+			else if (currChar[0] == '"')
+			{
+				// not allowed to tokenize attribute value,
+				// if attribute name not already found
+				if (currAttribName.empty())
+				{
+					errorMsg = "MISSING_ATTRIBUTE_NAME::Missing attribute name at index: ";
+					nextState = TokenizerState::Malformed;
+					break;
+				}
+				else
+				{
+					XMLAttrib* foundAttrib = new XMLAttrib;
+					
+					XMLString* attribName = new XMLString;
+					XMLString* attribValue = new XMLString;
+
+					foundAttrib->name = attribName;
+					foundAttrib->value = attribValue;
+
+					foundAttrib->name->value = currAttribName;
+					foundAttrib->name->length = currAttribName.size();
+
+					foundAttrib->value->value = currToken;
+					foundAttrib->value->length = currToken.size();
+
+					currAttribName.clear();
+
+					foundAttributes.push_back(foundAttrib);
+				}
+			}
+
+			// reset accumulator, tick, move to next state
+			currToken.clear();
+			currChar++;
+			nextState = TokenizerState::ConsumeAnyWhitespace;
 		}
 		break;
 
@@ -246,8 +335,35 @@ inline std::vector<XMLAttrib*> TokenizeAttributes(XMLParser* parser, XMLString* 
 		}
 		break;
 		}
+
+		if (currChar == openingTag->value.end())
+		{
+			nextState = TokenizerState::EndOfString;
+		}
+
+		// if end of string, without setting tag name, set it
+		if (nextState == TokenizerState::EndOfString && tagName.empty())
+		{
+			tagName = currToken;
+		}
+
+		//std::cout << ToString(currState) << "->" << ToString(nextState) << ':' << currChar[0] << '\n';
 		currState = nextState;
 	}
+
+	/*if (foundAttributes.size() == 0)
+	{
+		std::cout << "No attribs found!" << std::endl;
+		std::exit(-1);
+	}
+
+	for (auto attrib : foundAttributes)
+	{
+		std::cout << attrib->name->value << '(' << attrib->name->length << ')'
+			<< '='
+			<< attrib->value->value << '(' << attrib->value->length << ')' << '\n';
+	}
+	std::exit(-1);*/
 
 	openingTag->value = tagName;
 	openingTag->length = tagName.size();
