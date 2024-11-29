@@ -80,7 +80,7 @@ inline void ConsumeWhitespace(XMLParser* parser)
 * i.e. attrib1 & attrib2 along with their values as XMLAttrib structs
 */
 
-// TEMP move outside of TokenizeAttributes to allow debug prints
+// TEMP moved outside of TokenizeAttributes to allow debug prints
 enum class TokenizerState : uint8_t
 {
 	InitialWhitespaceCheck,		// disallows whitespace (as in xml spec)
